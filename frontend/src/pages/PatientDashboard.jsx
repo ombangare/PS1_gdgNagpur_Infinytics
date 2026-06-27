@@ -101,7 +101,11 @@ const PatientDashboard = () => {
   if (!patient) return null;
 
   const aiData = patient.aiAssessment || {};
-  const condition = aiData.condition || "Pending Assessment";
+  let displayCondition = aiData.condition || "Pending Assessment";
+// If the doctor has treated them, remove the "Pending" text!
+if (liveData.status === 'Treated') {
+    displayCondition = displayCondition.replace(" (Pending Doctor Review)", "");
+}
   const riskLevel = aiData.risk_level || aiData.risk || "Unknown";
   const isHighRisk = String(riskLevel).toLowerCase() === 'high';
   const firstName = patient.name ? String(patient.name).split(' ')[0] : 'Patient';
@@ -144,7 +148,7 @@ MediFlow AI - Official Medical Record
 -------------------------------------------
 Patient Name: ${patient.name || 'Patient'}
 Date: ${new Date().toLocaleDateString()}
-AI Predicted Condition: ${condition}
+AI Predicted Condition: ${displayCondition}
 
 DOCTOR'S PRESCRIPTION & ADVICE:
 ${liveData.advice || aiData.advice}
@@ -238,12 +242,16 @@ Generated securely by MediFlow AI
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="bg-gray-50 dark:bg-gray-900/50 p-5 rounded-2xl">
             <p className="text-xs text-gray-500 font-bold mb-1 uppercase tracking-wider">Predicted Condition</p>
-            <p className="font-bold text-xl dark:text-white">{condition}</p>
+            <p className="font-bold text-xl dark:text-white">{displayCondition}</p>
           </div>
           <div className="md:col-span-2 bg-gray-50 dark:bg-gray-900/50 p-5 rounded-2xl">
              <p className="text-xs text-gray-500 font-bold mb-2 uppercase tracking-wider">Preliminary Advice</p>
              {/* Uses the original AI advice, NOT the doctor's prescription */}
-             <p className="font-medium text-gray-800 dark:text-gray-200">{aiData.advice || aiData.reason || "Please await doctor consultation."}</p>
+             <p className="font-medium text-gray-800 dark:text-gray-200">
+  {liveData.status === 'Treated' 
+    ? "AI Assessment complete. Please refer to the official doctor's prescription below." 
+    : (aiData.reason || "Critical condition detected. Please await doctor consultation.")}
+</p>
           </div>
         </div>
       </div>
