@@ -8,9 +8,8 @@ import axios from 'axios';
  * vercel.json redirects to your Python backend.
  * -------------------------------------------------------------------------
  */
-const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ? 'http://127.0.0.1:5000'
-  : 'https://mediflow-ai-backend.onrender.com'; // <-- REPLACE THIS STRING WITH YOUR RENDER URL
+// Hardcode your direct Render backend URL
+const API_BASE_URL = 'https://mediflow-ai-backend.onrender.com';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
