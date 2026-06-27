@@ -1,48 +1,44 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy  # <--- NEW SQLITE IMPORT
 from utils import calculate_wait_time, get_peak_hours
 from model import predict_disease
-from firebase_config import db
 import json
 import os
 import uuid  
 import datetime
-import threading
 
 app = Flask(__name__)
 CORS(app)
 
 # -----------------------------
-# Background Thread Helper
+# NEW SQLITE CONFIGURATION
 # -----------------------------
-def fire_and_forget(task, *args, **kwargs):
-    """Runs Firebase tasks in the background so the frontend never waits."""
-    thread = threading.Thread(target=task, args=args, kwargs=kwargs)
-    thread.start()
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mediflow.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
 
-def async_firebase_set(collection, doc_id, data):
-    try:
-        db.collection(collection).document(doc_id).set(data)
-    except Exception as e:
-        print(f"Background Firebase Error: {e}")
+# -----------------------------
+# NEW SQLITE MODELS
+# -----------------------------
+class PatientDB(db.Model):
+    id = db.Column(db.String(50), primary_key=True)
+    name = db.Column(db.String(100))
+    phone = db.Column(db.String(20))
+    email = db.Column(db.String(100))
+    disease = db.Column(db.String(100))
+    risk_level = db.Column(db.String(20))
+    status = db.Column(db.String(20), default='Waiting')
+    priority = db.Column(db.Integer)
 
-def async_firebase_delete(collection, doc_id):
-    try:
-        db.collection(collection).document(doc_id).delete()
-    except:
-        pass
-
-def async_firebase_update(collection, doc_id, data):
-    try:
-        db.collection(collection).document(doc_id).update(data)
-    except:
-        pass
-
-def async_firebase_add(collection, data):
-    try:
-        db.collection(collection).add(data)
-    except:
-        pass
+class HistoryDB(db.Model):
+    id = db.Column(db.String(50), primary_key=True)
+    patient_id = db.Column(db.String(50))
+    date = db.Column(db.String(50))
+    condition = db.Column(db.String(100))
+    advice = db.Column(db.Text)
+    source = db.Column(db.String(50))
+    created_at = db.Column(db.String(50))
 
 # -----------------------------
 import tempfile
@@ -73,7 +69,7 @@ def save_data(filepath, data):
     try:
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w") as f:
-            json.dump(data, f, indent=4)
+             json.dump(data, f, indent=4)
     except:
         pass
 
@@ -106,7 +102,7 @@ def analyze_priority(disease, symptoms):
     MEDIUM_KEYWORDS = [
         "flu", "fever", "migraine", "vomiting", "diarrhea", "stomach ache", 
         "dizziness", "nausea", "sprain", "rash"
-    ]
+     ]
 
     if any(keyword in combined_text for keyword in CRITICAL_KEYWORDS):
         return 100, "CRITICAL: Immediate life-threatening symptoms detected."
@@ -116,7 +112,6 @@ def analyze_priority(disease, symptoms):
         return 50, "MODERATE: Standard illness or moderate discomfort."
     else:
         return 10, "STABLE: General checkup or minor symptoms."
-
 
 def generate_advice(disease, priority_score):
     if priority_score >= 100:
@@ -187,8 +182,17 @@ def add_patient():
         queue = sorted(queue, key=lambda x: int(x.get('priority', 0)), reverse=True)
         save_data(DATA_FILE, queue) # <--- FIXED
 
-        # 2. Sync to Firebase in the background (Instantly moves on!)
-        fire_and_forget(async_firebase_set, "patients", patient_id, patient)
+        # --- NEW SQLITE ADDITION ---
+        try:
+            new_db_patient = PatientDB(
+                id=patient_id, name=name, phone=data.get('phone', ''), email=data.get('email', ''),
+                disease=disease, risk_level=risk_level, status="Waiting", priority=priority
+            )
+            db.session.add(new_db_patient)
+            db.session.commit()
+        except Exception as db_e:
+            print("SQLite Error on Add Patient:", db_e)
+        # ---------------------------
 
         patient_index = next((i for i, p in enumerate(queue) if p['id'] == patient_id), 0)
         wait_time = patient_index * 15
@@ -219,7 +223,7 @@ def get_queue():
 
 @app.route('/complete_patient/<string:patient_id>', methods=['POST'])
 def complete_patient(patient_id):
-    global queue, history_db, completed_db # Added completed_db
+    global queue, history_db, completed_db
     data = request.json or {}
     doctor_advice = data.get('advice', 'Standard treatment applied. Rest and hydrate.')
 
@@ -248,9 +252,22 @@ def complete_patient(patient_id):
         save_data(COMPLETED_FILE, completed_db)
         # -----------------------------
 
-        fire_and_forget(async_firebase_set, "completed_patients", patient_id, patient_to_remove)
-        fire_and_forget(async_firebase_delete, "patients", patient_id)
-        fire_and_forget(async_firebase_add, "patient_history", history_record)
+        # --- NEW SQLITE ADDITION ---
+        try:
+            db_patient = PatientDB.query.get(patient_id)
+            if db_patient:
+                db_patient.status = 'Treated'
+            
+            new_history = HistoryDB(
+                id=str(uuid.uuid4()), patient_id=patient_id, date=history_record['date'],
+                condition=history_record['condition'], advice=history_record['advice'],
+                source=history_record['source'], created_at=history_record['created_at']
+            )
+            db.session.add(new_history)
+            db.session.commit()
+        except Exception as db_e:
+            print("SQLite Error on Complete Patient:", db_e)
+        # ---------------------------
 
         return jsonify({"message": "Patient marked as treated.", "removed": patient_to_remove})
 
@@ -277,8 +294,7 @@ def doctor_stats():
 
 @app.route('/patient_status/<string:patient_id>', methods=['GET'])
 def get_patient_status(patient_id):
-    global queue, completed_db # Added completed_db here!
-    
+    global queue, completed_db
     sorted_queue = sorted(queue, key=lambda x: int(x.get('priority', 0)), reverse=True)
     
     for index, p in enumerate(sorted_queue):
@@ -300,17 +316,8 @@ def get_patient_status(patient_id):
         })
     # -----------------------------------------------------------------
 
-    try:
-        treated_doc = db.collection("completed_patients").document(patient_id).get()
-        if treated_doc.exists:
-            data = treated_doc.to_dict()
-            return jsonify({
-                "position": 0, "wait_time": 0, "status": "Treated", "advice": data.get('advice')
-            })
-    except Exception as e:
-        print("Firebase Error:", e)
-
     return jsonify({"error": "Patient not found"}), 404
+
 
 @app.route('/call_patient/<string:patient_id>', methods=['POST'])
 def call_patient(patient_id):
@@ -321,8 +328,15 @@ def call_patient(patient_id):
         patient['status'] = 'Called'
         save_data(DATA_FILE, queue) # <--- FIXED
         
-        # Background update
-        fire_and_forget(async_firebase_update, "patients", patient_id, {"status": "Called"})
+        # --- NEW SQLITE ADDITION ---
+        try:
+            db_patient = PatientDB.query.get(patient_id)
+            if db_patient:
+                db_patient.status = 'Called'
+                db.session.commit()
+        except Exception as db_e:
+            print("SQLite Error on Call Patient:", db_e)
+        # ---------------------------
             
         return jsonify({"message": "Patient called successfully"})
         
@@ -332,7 +346,7 @@ def call_patient(patient_id):
 def get_patient_history(patient_id):
     global local_history_db
     try:
-        # Read instantly from local memory instead of broken Firebase
+        # Read instantly from local memory
         history = [h for h in local_history_db if h.get('patient_id') == patient_id]
         history = sorted(history, key=lambda x: x.get('created_at', ''), reverse=True)
         return jsonify(history), 200
@@ -368,17 +382,28 @@ def add_external_history(patient_id):
         # 1. Save to local memory instantly!
         local_history_db.append(record)
         
-        # 2. Background Firebase Sync
-        fire_and_forget(async_firebase_add, "patient_history", record)
+        # --- NEW SQLITE ADDITION ---
+        try:
+            new_sql_history = HistoryDB(
+                id=record['id'], patient_id=patient_id, date=final_date,
+                condition=record['condition'], advice=record['advice'],
+                source=record['source'], created_at=record['created_at']
+            )
+            db.session.add(new_sql_history)
+            db.session.commit()
+        except Exception as db_e:
+            print("SQLite Error on Add External:", db_e)
+        # ---------------------------
         
         return jsonify({"message": "External record added successfully"}), 201
     except Exception as e:
         print(f"History Route Error: {e}")
         return jsonify({"error": str(e)}), 500
 
+
 @app.route('/retrieve_patient', methods=['POST'])
 def retrieve_patient():
-    global queue, completed_db # Added completed_db here
+    global queue, completed_db 
     data = request.json
     phone_to_find = data.get('phone', '').strip()
     
@@ -403,7 +428,7 @@ def retrieve_patient():
             }
         }), 200
 
-    # 2. THE FIX: Search the INSTANT Local Cache first (Beats the Firebase delay)
+    # 2. THE FIX: Search the INSTANT Local Cache first
     completed_patient = next((p for p in completed_db if p.get('phone') == phone_to_find), None)
     
     if completed_patient:
@@ -421,29 +446,12 @@ def retrieve_patient():
             }
         }), 200
 
-    # 3. Fallback: Search Firebase (With the fixed warning syntax)
-    try:
-        completed_ref = db.collection("completed_patients").where(field_path="phone", op_string="==", value=phone_to_find).stream()
-        for doc in completed_ref:
-            cp = doc.to_dict()
-            return jsonify({
-                "success": True,
-                "patient": {
-                    **cp,
-                    "aiAssessment": {
-                        "id": cp['id'],
-                        "condition": cp.get('disease', ''),
-                        "risk_level": cp.get('risk_level', ''),
-                        "advice": cp.get('advice', ''),
-                        "priority": cp.get('priority', 0)
-                    }
-                }
-            }), 200
-    except Exception as e:
-        print("Firebase search error:", e)
-
     return jsonify({"error": "No session found for this number."}), 404
 
 
 if __name__ == '__main__':
-      app.run(debug=True)
+    # --- NEW SQLITE ADDITION ---
+    with app.app_context():
+        db.create_all()  # This creates mediflow.db automatically!
+    # ---------------------------
+    app.run(host='0.0.0.0', port=5000)
