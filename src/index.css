@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+/* This is the magic Tailwind v4 command to make your Dark Mode button work! */
+@variant dark (&:where(.dark, .dark *));
+
+/* Since v4 prefers CSS over tailwind.config.js, we put your clinical colors right here */
+@theme {
+  --color-clinical-50: #f0fdfa;
+  --color-clinical-100: #ccfbf1;
+  --color-clinical-500: #14b8a6;
+  --color-clinical-600: #0d9488;
+  --color-clinical-900: #134e4a;
+}
+
+/* --- PRINT & PDF EXPORT STYLES --- */
+@media print {
+  /* 1. Hide absolutely everything on the page */
+  body * {
+    visibility: hidden;
+  }
+  
+  /* 2. Make ONLY the prescription area and its children visible */
+  #prescription-print-area, #prescription-print-area * {
+    visibility: visible;
+  }
+  
+  /* 3. Move the prescription to the top left of the PDF page */
+  #prescription-print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 20px;
+    box-shadow: none !important; 
+    border: none !important;
+  }
+
+  /* 4. Hide the "Download PDF" button inside the actual document */
+  .no-print {
+    display: none !important;
+  }
+}
