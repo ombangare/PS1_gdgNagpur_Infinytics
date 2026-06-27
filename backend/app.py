@@ -9,7 +9,11 @@ import uuid
 import datetime
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": [
+    "http://localhost:5173", 
+    "http://localhost:3000",
+    "https://mediflow-frontend1.vercel.app"
+]}})
 
 # -----------------------------
 # NEW SQLITE CONFIGURATION
