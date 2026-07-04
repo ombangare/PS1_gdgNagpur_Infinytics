@@ -1,86 +1,53 @@
-from flask import Flask, request, jsonify
+import os
+import uuid
+import datetime
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy  # <--- NEW SQLITE IMPORT
+from dotenv import load_dotenv
+from supabase import create_client, Client
 from utils import calculate_wait_time, get_peak_hours
 from model import predict_disease
-import json
-import os
-import uuid  
-import datetime
+from groq import Groq
+
+# -----------------------------
+# 🛡️ BULLETPROOF .env LOADER
+# -----------------------------
+env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '.env'))
+
+# 1. Try reading as standard UTF-8
+load_dotenv(env_path, override=True, encoding='utf-8')
+
+# 2. If Windows saved it as UTF-16 (from PowerShell), force read it that way!
+if not os.environ.get("SUPABASE_URL"):
+    load_dotenv(env_path, override=True, encoding='utf-16')
+if not os.environ.get("SUPABASE_URL"):
+    load_dotenv(env_path, override=True, encoding='utf-16-le')
+
+# -----------------------------
+# ☁️ CLOUD DATABASE (SUPABASE)
+# -----------------------------
+supabase_url: str = os.environ.get("SUPABASE_URL")
+supabase_key: str = os.environ.get("SUPABASE_KEY")
+
+if not supabase_url or not supabase_key:
+    raise ValueError("CRITICAL: Supabase credentials missing in .env file.")
+
+supabase: Client = create_client(supabase_url, supabase_key)
+
+# Initialize Groq Client for Streaming AI
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# -----------------------------
-# NEW SQLITE CONFIGURATION
-# -----------------------------
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mediflow.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
-
-# -----------------------------
-# NEW SQLITE MODELS
-# -----------------------------
-class PatientDB(db.Model):
-    id = db.Column(db.String(50), primary_key=True)
-    name = db.Column(db.String(100))
-    phone = db.Column(db.String(20))
-    email = db.Column(db.String(100))
-    disease = db.Column(db.String(100))
-    risk_level = db.Column(db.String(20))
-    status = db.Column(db.String(20), default='Waiting')
-    priority = db.Column(db.Integer)
-
-class HistoryDB(db.Model):
-    id = db.Column(db.String(50), primary_key=True)
-    patient_id = db.Column(db.String(50))
-    date = db.Column(db.String(50))
-    condition = db.Column(db.String(100))
-    advice = db.Column(db.Text)
-    source = db.Column(db.String(50))
-    created_at = db.Column(db.String(50))
-
-# -----------------------------
-import tempfile
-
-TEMP_DIR = tempfile.gettempdir()
-DATA_FILE = os.path.join(TEMP_DIR, "sample_patients.json")
-HISTORY_FILE = os.path.join(TEMP_DIR, "patient_history.json")
-COMPLETED_FILE = os.path.join(TEMP_DIR, "completed_patients.json")
 DOCTORS = ["Dr. Sharma", "Dr. Mehta", "Dr. Iyer"]
 
-def assign_doctor(queue):
-    if not queue:
-        return DOCTORS[0]
-    return DOCTORS[len(queue) % len(DOCTORS)]
+def assign_doctor(queue_length):
+    return DOCTORS[queue_length % len(DOCTORS)]
 
-def load_data(filepath):
-    try:
-        if os.path.exists(filepath):
-            with open(filepath, "r") as f:
-                content = f.read().strip()
-                if content:
-                    return json.loads(content)
-    except:
-        return []
-    return []
-
-def save_data(filepath, data):
-    try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, "w") as f:
-             json.dump(data, f, indent=4)
-    except:
-        pass
-
-# Load all our instant caches!
-queue = load_data(DATA_FILE)
-history_db = load_data(HISTORY_FILE)
-completed_db = load_data(COMPLETED_FILE)
-local_history_db = []
 
 # -----------------------------
-# 🧠 AI Advice Engine & Priority Scanner
+# 🧠 AI Advice Engine & Priority Scanner (UNTOUCHED)
 # -----------------------------
 def analyze_priority(disease, symptoms):
     disease_lower = disease.lower()
@@ -123,24 +90,23 @@ def generate_advice(disease, priority_score):
     else:
         return "Condition appears stable. Routine checkup protocols apply."
 
+
 # -----------------------------
-# Routes
+# 🚀 CLOUD CONNECTED ROUTES
 # -----------------------------
+
 @app.route('/add_patient', methods=['POST'])
 def add_patient():
-    global queue 
     try:
         data = request.json
         raw_symptoms = data.get('symptoms', [])
-        if isinstance(raw_symptoms, str):
-            symptoms = [s.strip() for s in raw_symptoms.split(',') if s.strip()]
-        else:
-            symptoms = raw_symptoms
+        symptoms = [s.strip() for s in raw_symptoms.split(',')] if isinstance(raw_symptoms, str) else raw_symptoms
 
         name = data.get('name')
         age = int(data.get('age', 0)) if data.get('age') else 0
         weight = int(data.get('weight', 0)) if data.get('weight') else 0
         height = int(data.get('height', 0)) if data.get('height') else 0 
+        phone = data.get('phone', '').strip()
 
         if not name or age == 0:
             return jsonify({"error": "Name and age are required"}), 400
@@ -153,51 +119,49 @@ def add_patient():
             disease = "Critical Emergency (Pending Doctor Review)"
         elif priority >= 75 and "General Checkup" in disease:
             disease = "Urgent Care Required"
-        # ----------------------------------------
 
         risk_level = "High" if priority >= 100 else "Medium" if priority >= 50 else "Low"
+        
+        # 1. UPSERT PATIENT (Supports returning patients by phone)
         patient_id = str(uuid.uuid4())
+        if phone:
+            existing = supabase.table('patients').select('id').eq('phone_number', phone).execute()
+            if existing.data:
+                patient_id = existing.data[0]['id'] # Use existing profile
+            else:
+                supabase.table('patients').insert({
+                    'id': patient_id, 'phone_number': phone, 'full_name': name,
+                    'age': age, 'weight_kg': weight, 'height_cm': height
+                }).execute()
+        else:
+            # If no phone is provided, create a guest profile
+            supabase.table('patients').insert({
+                'id': patient_id, 'phone_number': patient_id, 'full_name': name,
+                'age': age, 'weight_kg': weight, 'height_cm': height
+            }).execute()
 
-        patient = {
-            "id": patient_id, 
-            "name": name,
-            "phone": data.get('phone', ''),
-            "email": data.get('email', ''),
-            "age": age,
-            "weight": weight,
-            "height": height, 
-            "symptoms": symptoms,
-            "priority": priority,
-            "disease": disease,
-            "reason": reason,
-            "risk_level": risk_level,
-            "assigned_doctor": assign_doctor(queue),
-            "arrival_time": datetime.datetime.now().strftime("%H:%M"),
-            "advice": generate_advice(disease, priority),
-            "status": "Waiting"
-        }
+        # 2. LOG THE VISIT (Checkup)
+        visit_id = str(uuid.uuid4())
+        supabase.table('visits').insert({
+            'id': visit_id,
+            'patient_id': patient_id,
+            'symptoms_log': ", ".join(symptoms),
+            'ai_predicted_condition': disease,
+            'risk_level': risk_level,
+            'queue_priority': priority,
+            'status': 'Waiting',
+            'doctor_advice': generate_advice(disease, priority)
+        }).execute()
 
-        # 1. Update Local Queue Immediately
-        queue.append(patient)
-        queue = sorted(queue, key=lambda x: int(x.get('priority', 0)), reverse=True)
-        save_data(DATA_FILE, queue) # <--- FIXED
+        # Calculate Queue Logic dynamically from Cloud DB
+        queue_res = supabase.table('visits').select('id', count='exact').eq('status', 'Waiting').gte('queue_priority', priority).execute()
+        position = queue_res.count if queue_res.count else 1
+        wait_time = (position - 1) * 15
 
-        # --- NEW SQLITE ADDITION ---
-        try:
-            new_db_patient = PatientDB(
-                id=patient_id, name=name, phone=data.get('phone', ''), email=data.get('email', ''),
-                disease=disease, risk_level=risk_level, status="Waiting", priority=priority
-            )
-            db.session.add(new_db_patient)
-            db.session.commit()
-        except Exception as db_e:
-            print("SQLite Error on Add Patient:", db_e)
-        # ---------------------------
+        all_waiting = supabase.table('visits').select('id', count='exact').eq('status', 'Waiting').execute()
+        total_in_queue = all_waiting.count if all_waiting.count else 0
 
-        patient_index = next((i for i, p in enumerate(queue) if p['id'] == patient_id), 0)
-        wait_time = patient_index * 15
-
-        # 3. Respond to frontend instantly
+        # Respond in the exact format React expects
         return jsonify({
             "id": patient_id,
             "predicted_disease": disease,
@@ -206,8 +170,8 @@ def add_patient():
             "wait_time": wait_time,
             "priority": priority,
             "reason": reason,
-            "assigned_doctor": patient["assigned_doctor"],
-            "advice": patient["advice"]
+            "assigned_doctor": assign_doctor(total_in_queue),
+            "advice": generate_advice(disease, priority)
         })
 
     except Exception as e:
@@ -217,241 +181,231 @@ def add_patient():
 
 @app.route('/queue', methods=['GET'])
 def get_queue():
-    sorted_queue = sorted(queue, key=lambda x: int(x.get('priority', 0)), reverse=True)
-    return jsonify(sorted_queue)
+    try:
+        # Join visits and patients tables automatically via Supabase
+        res = supabase.table('visits').select('*, patients(*)').eq('status', 'Waiting').order('queue_priority', desc=True).execute()
+        
+        queue_list = []
+        for v in res.data:
+            p = v.get('patients', {})
+            queue_list.append({
+                "id": v['patient_id'],
+                "name": p.get('full_name', 'Unknown Patient'),
+                "phone": p.get('phone_number', ''),
+                "age": p.get('age', 0),
+                "weight": p.get('weight_kg', 0),
+                "height": p.get('height_cm', 0),
+                "symptoms": [s.strip() for s in v.get('symptoms_log', '').split(',')] if v.get('symptoms_log') else [],
+                "priority": v.get('queue_priority', 0),
+                "disease": v.get('ai_predicted_condition', ''),
+                "risk_level": v.get('risk_level', ''),
+                "status": v.get('status', 'Waiting'),
+                "advice": v.get('doctor_advice', '')
+            })
+        return jsonify(queue_list), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/complete_patient/<string:patient_id>', methods=['POST'])
 def complete_patient(patient_id):
-    global queue, history_db, completed_db
-    data = request.json or {}
-    doctor_advice = data.get('advice', 'Standard treatment applied. Rest and hydrate.')
+    try:
+        data = request.json or {}
+        doctor_advice = data.get('advice', 'Standard treatment applied. Rest and hydrate.')
 
-    patient_to_remove = next((p for p in queue if p.get('id') == patient_id), None)
-
-    if patient_to_remove:
-        patient_to_remove['advice'] = doctor_advice
-        patient_to_remove['status'] = 'Treated'
-        queue.remove(patient_to_remove)
-        save_data(DATA_FILE, queue)
-
-        history_record = {
-            "patient_id": patient_id,
-            "date": datetime.datetime.now().strftime("%b %d, %Y"),
-            "condition": patient_to_remove.get("disease", "Clinic Checkup"),
-            "advice": doctor_advice,
-            "source": "Mediflow Clinic",
-            "created_at": datetime.datetime.now().isoformat()
-        }
+        # Find the patient's active visit
+        active = supabase.table('visits').select('id').eq('patient_id', patient_id).neq('status', 'Treated').order('created_at', desc=True).limit(1).execute()
         
-        history_db.append(history_record)
-        save_data(HISTORY_FILE, history_db)
-
-        # --- THE INSTANT CACHE FIX ---
-        completed_db.append(patient_to_remove)
-        save_data(COMPLETED_FILE, completed_db)
-        # -----------------------------
-
-        # --- NEW SQLITE ADDITION ---
-        try:
-            db_patient = PatientDB.query.get(patient_id)
-            if db_patient:
-                db_patient.status = 'Treated'
+        if active.data:
+            # Update to Treated (This automatically preserves it for their History page!)
+            supabase.table('visits').update({
+                'status': 'Treated',
+                'doctor_advice': doctor_advice
+            }).eq('id', active.data[0]['id']).execute()
             
-            new_history = HistoryDB(
-                id=str(uuid.uuid4()), patient_id=patient_id, date=history_record['date'],
-                condition=history_record['condition'], advice=history_record['advice'],
-                source=history_record['source'], created_at=history_record['created_at']
-            )
-            db.session.add(new_history)
-            db.session.commit()
-        except Exception as db_e:
-            print("SQLite Error on Complete Patient:", db_e)
-        # ---------------------------
-
-        return jsonify({"message": "Patient marked as treated.", "removed": patient_to_remove})
-
-    return jsonify({"error": "Patient not found"}), 404
-
-
-@app.route('/analytics', methods=['GET'])
-def get_analytics():
-    return jsonify({"peak_hours": get_peak_hours(queue)})
-
-
-@app.route('/priority', methods=['GET'])
-def get_priority_patients():
-    return jsonify([p for p in queue if p.get('priority', 0) >= 100])
-
-
-@app.route('/doctor_stats', methods=['GET'])
-def doctor_stats():
-    return jsonify({
-        "total_patients": len(queue),
-        "critical_cases": len([p for p in queue if p.get('priority', 0) >= 100])
-    })
-
-
-@app.route('/patient_status/<string:patient_id>', methods=['GET'])
-def get_patient_status(patient_id):
-    global queue, completed_db
-    sorted_queue = sorted(queue, key=lambda x: int(x.get('priority', 0)), reverse=True)
-    
-    for index, p in enumerate(sorted_queue):
-        if p.get('id') == patient_id:
-            return jsonify({
-                "position": index + 1, 
-                "wait_time": index * 15,
-                "status": p.get('status', 'Waiting')
-            })
+            return jsonify({"message": "Patient marked as treated."})
             
-    # --- INSTANT CACHE CHECK (Fixes the infinite loading spinner!) ---
-    completed_patient = next((p for p in completed_db if p.get('id') == patient_id), None)
-    if completed_patient:
-        return jsonify({
-            "position": 0, 
-            "wait_time": 0, 
-            "status": "Treated", 
-            "advice": completed_patient.get('advice')
-        })
-    # -----------------------------------------------------------------
-
-    return jsonify({"error": "Patient not found"}), 404
+        return jsonify({"error": "Patient not found or already treated."}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/call_patient/<string:patient_id>', methods=['POST'])
 def call_patient(patient_id):
-    global queue
-    patient = next((p for p in queue if p.get('id') == patient_id), None)
-    
-    if patient:
-        patient['status'] = 'Called'
-        save_data(DATA_FILE, queue) # <--- FIXED
-        
-        # --- NEW SQLITE ADDITION ---
-        try:
-            db_patient = PatientDB.query.get(patient_id)
-            if db_patient:
-                db_patient.status = 'Called'
-                db.session.commit()
-        except Exception as db_e:
-            print("SQLite Error on Call Patient:", db_e)
-        # ---------------------------
-            
-        return jsonify({"message": "Patient called successfully"})
-        
-    return jsonify({"error": "Patient not found"}), 404
-
-@app.route('/patient_history/<string:patient_id>', methods=['GET'])
-def get_patient_history(patient_id):
-    global local_history_db
     try:
-        # Read instantly from local memory
-        history = [h for h in local_history_db if h.get('patient_id') == patient_id]
-        history = sorted(history, key=lambda x: x.get('created_at', ''), reverse=True)
-        return jsonify(history), 200
+        active = supabase.table('visits').select('id').eq('patient_id', patient_id).neq('status', 'Treated').order('created_at', desc=True).limit(1).execute()
+        if active.data:
+            supabase.table('visits').update({'status': 'Called'}).eq('id', active.data[0]['id']).execute()
+            return jsonify({"message": "Patient called successfully"})
+            
+        return jsonify({"error": "Patient not found"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/patient_status/<string:patient_id>', methods=['GET'])
+def get_patient_status(patient_id):
+    try:
+        # Pull the patient's most recent checkup
+        latest = supabase.table('visits').select('*').eq('patient_id', patient_id).order('created_at', desc=True).limit(1).execute()
+        
+        if not latest.data:
+            return jsonify({"error": "Patient not found"}), 404
+            
+        v = latest.data[0]
+        status = v['status']
+        
+        if status in ['Treated', 'Called']:
+            return jsonify({
+                "position": 0, "wait_time": 0, "status": status, "advice": v.get('doctor_advice')
+            })
+        else:
+            # Calculate position in live queue
+            higher = supabase.table('visits').select('id', count='exact').eq('status', 'Waiting').gte('queue_priority', v.get('queue_priority', 0)).execute()
+            position = higher.count if higher.count else 1
+            return jsonify({
+                "position": position, 
+                "wait_time": (position - 1) * 15,
+                "status": "Waiting"
+            })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/patient_history/<string:patient_id>', methods=['GET'])
+def get_patient_history(patient_id):
+    try:
+        # Get all completed checkups OR external uploads
+        visits = supabase.table('visits').select('*').eq('patient_id', patient_id).in_('status', ['Treated', 'External']).order('created_at', desc=True).execute()
+        
+        history_list = []
+        for v in visits.data:
+            # Parse ISO date back to display format
+            date_str = datetime.datetime.fromisoformat(v['created_at']).strftime("%b %d, %Y") if v.get('created_at') else ""
+            
+            history_list.append({
+                "id": v['id'],
+                "patient_id": v['patient_id'],
+                "date": date_str,
+                "condition": v.get('ai_predicted_condition', 'Clinic Checkup'),
+                "advice": v.get('doctor_advice', ''),
+                "source": "External Doctor" if v.get('status') == 'External' else "Mediflow Clinic",
+                "created_at": v.get('created_at', '')
+            })
+        return jsonify(history_list), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/add_external_history/<string:patient_id>', methods=['POST'])
 def add_external_history(patient_id):
-    global local_history_db
     try:
         data = request.json
-        
-        # Bulletproof Date Handling
-        date_str = data.get("date", "")
-        final_date = datetime.datetime.now().strftime("%b %d, %Y")
-        if date_str:
-            try:
-                date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-                final_date = date_obj.strftime("%b %d, %Y")
-            except:
-                final_date = date_str
-
-        record = {
-            "id": str(uuid.uuid4()), # Give it an ID for React
-            "patient_id": patient_id,
-            "date": final_date,
-            "condition": data.get("condition") or data.get("doctor") or "General Checkup",
-            "advice": data.get("advice") or data.get("prescription") or "Rest",
-            "source": "External Doctor",
-            "created_at": datetime.datetime.now().isoformat()
-        }
-        
-        # 1. Save to local memory instantly!
-        local_history_db.append(record)
-        
-        # --- NEW SQLITE ADDITION ---
-        try:
-            new_sql_history = HistoryDB(
-                id=record['id'], patient_id=patient_id, date=final_date,
-                condition=record['condition'], advice=record['advice'],
-                source=record['source'], created_at=record['created_at']
-            )
-            db.session.add(new_sql_history)
-            db.session.commit()
-        except Exception as db_e:
-            print("SQLite Error on Add External:", db_e)
-        # ---------------------------
+        # Inject directly into visits table as 'External'
+        supabase.table('visits').insert({
+            'id': str(uuid.uuid4()),
+            'patient_id': patient_id,
+            'ai_predicted_condition': data.get("condition") or data.get("doctor") or "General Checkup",
+            'doctor_advice': data.get("advice") or data.get("prescription") or "Rest",
+            'status': 'External' # Tags it as past history, keeps it out of the live queue
+        }).execute()
         
         return jsonify({"message": "External record added successfully"}), 201
     except Exception as e:
-        print(f"History Route Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/retrieve_patient', methods=['POST'])
 def retrieve_patient():
-    global queue, completed_db 
-    data = request.json
-    phone_to_find = data.get('phone', '').strip()
-    
-    if not phone_to_find:
-        return jsonify({"error": "Phone number is required"}), 400
+    try:
+        data = request.json
+        phone_to_find = data.get('phone', '').strip()
+        
+        if not phone_to_find:
+            return jsonify({"error": "Phone number is required"}), 400
 
-    # 1. Search the ACTIVE queue
-    existing_patient = next((p for p in queue if p.get('phone') == phone_to_find), None)
-
-    if existing_patient:
+        # Look up patient profile
+        p_res = supabase.table('patients').select('*').eq('phone_number', phone_to_find).execute()
+        if not p_res.data:
+            return jsonify({"error": "No session found for this number."}), 404
+            
+        patient = p_res.data[0]
+        
+        # Get their latest checkup
+        v_res = supabase.table('visits').select('*').eq('patient_id', patient['id']).order('created_at', desc=True).limit(1).execute()
+        if not v_res.data:
+            return jsonify({"error": "No visits found."}), 404
+            
+        visit = v_res.data[0]
+        
+        # Package identically to old React payload
         return jsonify({
             "success": True,
             "patient": {
-                **existing_patient,
+                "id": patient['id'],
+                "name": patient['full_name'],
+                "phone": patient['phone_number'],
+                "age": patient.get('age', 0),
+                "weight": patient.get('weight_kg', 0),
+                "height": patient.get('height_cm', 0),
+                "status": visit['status'],
                 "aiAssessment": {
-                    "id": existing_patient['id'],
-                    "condition": existing_patient.get('disease', ''),
-                    "risk_level": existing_patient.get('risk_level', ''),
-                    "advice": existing_patient.get('advice', ''),
-                    "priority": existing_patient.get('priority', 0)
+                    "id": patient['id'],
+                    "condition": visit.get('ai_predicted_condition', ''),
+                    "risk_level": visit.get('risk_level', ''),
+                    "advice": visit.get('doctor_advice', ''),
+                    "priority": visit.get('queue_priority', 0)
                 }
             }
         }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    # 2. THE FIX: Search the INSTANT Local Cache first
-    completed_patient = next((p for p in completed_db if p.get('phone') == phone_to_find), None)
-    
-    if completed_patient:
+
+@app.route('/doctor_stats', methods=['GET'])
+def doctor_stats():
+    try:
+        waiting = supabase.table('visits').select('id', count='exact').eq('status', 'Waiting').execute()
+        critical = supabase.table('visits').select('id', count='exact').eq('status', 'Waiting').gte('queue_priority', 100).execute()
+        
         return jsonify({
-            "success": True,
-            "patient": {
-                **completed_patient,
-                "aiAssessment": {
-                    "id": completed_patient['id'],
-                    "condition": completed_patient.get('disease', ''),
-                    "risk_level": completed_patient.get('risk_level', ''),
-                    "advice": completed_patient.get('advice', ''),
-                    "priority": completed_patient.get('priority', 0)
-                }
-            }
-        }), 200
+            "total_patients": waiting.count if waiting.count else 0,
+            "critical_cases": critical.count if critical.count else 0
+        })
+    except Exception as e:
+         return jsonify({"error": str(e)}), 500
 
-    return jsonify({"error": "No session found for this number."}), 404
+
+@app.route('/stream-triage', methods=['POST'])
+def stream_triage():
+    try:
+        data = request.json
+        user_message = data.get("message", "")
+        chat_history = data.get("history", [])
+
+        # System prompt to act like a professional medical assistant
+        messages = [
+            {"role": "system", "content": "You are a professional medical triage assistant. Be empathetic, concise, and ask one follow-up question at a time to understand symptoms. If the patient describes an emergency, advise them to seek help immediately."},
+        ] + chat_history + [{"role": "user", "content": user_message}]
+
+        def generate():
+            # Call Groq with stream=True
+            stream = groq_client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=messages,
+                temperature=0.7,
+                stream=True
+            )
+            # Extract text from chunk.choices[0].delta.content
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
+        return Response(generate(), mimetype='text/event-stream')
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == '__main__':
-    # --- NEW SQLITE ADDITION ---
-    with app.app_context():
-        db.create_all()  # This creates mediflow.db automatically!
-    # ---------------------------
+    # Starts the server!
     app.run(host='0.0.0.0', port=5000)

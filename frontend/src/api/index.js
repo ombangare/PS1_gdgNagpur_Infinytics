@@ -3,12 +3,9 @@ import axios from 'axios';
 /**
  * DYNAMIC API URL CONFIGURATION
  * -------------------------------------------------------------------------
- * When you are developing locally, it uses your Flask port (5000).
- * When it is live on Vercel, it uses the '/api' route which our 
- * vercel.json redirects to your Python backend.
+ * Hardcoded to connect directly to the live Python backend on Render.
  * -------------------------------------------------------------------------
  */
-// Hardcode your direct Render backend URL
 const API_BASE_URL = 'https://mediflow-ai-backend.onrender.com';
 
 const apiClient = axios.create({
@@ -70,7 +67,7 @@ export const callPatient = async (patientId) => {
   }
 };
 
-// 6. Fetch a patient's historical medical records from Firebase
+// 6. Fetch a patient's historical medical records
 export const getPatientHistory = async (patientId) => {
   try {
     const response = await apiClient.get(`/patient_history/${patientId}`);
@@ -95,7 +92,7 @@ export const addExternalHistory = async (patientId, historyData) => {
 export const retrieveExistingPatient = async (phone) => {
   try {
     const response = await apiClient.post('/retrieve_patient', { phone });
-    return response.data; // Returns { success: true, patient: {...} }
+    return response.data; 
   } catch (error) {
     throw error.response?.data || { error: "Server connection failed" };
   }
