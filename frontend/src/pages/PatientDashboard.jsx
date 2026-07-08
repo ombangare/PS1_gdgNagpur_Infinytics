@@ -1,6 +1,6 @@
 import React, { useContext, useEffect, useState, useCallback } from 'react';
 import { AuthContext } from '../context/AuthContext';
-import { getPatientStatus, getPatientHistory, addExternalHistory } from '../api';
+import apiClient, { getPatientStatus, getPatientHistory, addExternalHistory } from '../api';
 import HistoryTimeline from '../components/HistoryTimeline';
 import { toast } from 'react-toastify';
 
@@ -14,6 +14,10 @@ const PatientDashboard = () => {
   const [showAddRecord, setShowAddRecord] = useState(false);
   const [newRecord, setNewRecord] = useState({ date: '', condition: '', advice: '' });
   const [isSubmittingRecord, setIsSubmittingRecord] = useState(false);
+
+  // --- STATE FOR AVAILABLE DOCTORS ---
+  const [availableDoctors, setAvailableDoctors] = useState([]);
+  const [isLoadingDoctors, setIsLoadingDoctors] = useState(true);
 
   const patientId = patient?.aiAssessment?.id;
 
@@ -41,6 +45,17 @@ const PatientDashboard = () => {
     }
   }, [patientId, liveData.status]);
 
+  const fetchAvailableDoctors = useCallback(async () => {
+    try {
+      const response = await apiClient.get('/available-doctors');
+      setAvailableDoctors(response.data);
+    } catch (error) {
+      console.error("Error fetching doctors:", error);
+    } finally {
+      setIsLoadingDoctors(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!patientId) return;
 
@@ -61,9 +76,16 @@ const PatientDashboard = () => {
     // ---------------------------
 
     fetchStatus();
-    const interval = setInterval(() => fetchStatus(false), 10000);
-    return () => clearInterval(interval);
-  }, [fetchStatus, patientId]);
+    fetchAvailableDoctors();
+    
+    const statusInterval = setInterval(() => fetchStatus(false), 10000);
+    const doctorInterval = setInterval(fetchAvailableDoctors, 30000);
+    
+    return () => {
+      clearInterval(statusInterval);
+      clearInterval(doctorInterval);
+    };
+  }, [fetchStatus, fetchAvailableDoctors, patientId]);
 
   // --- DIRECT LOCAL FETCH TO PREVENT "SAVING..." FREEZE ---
   const handleAddExternalRecord = async (e) => {
@@ -313,6 +335,33 @@ Please proceed to the cabin!</h2>
           </button>
         </div>
       )}
+
+      {/* --- AVAILABLE DOCTORS SECTION --- */}
+      <div className="mt-12 mb-8 animate-fade-in-up">
+        <h2 className="text-2xl font-extrabold text-gray-800 dark:text-white mb-6 flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-clinical-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+          </svg>
+          Available Doctors
+        </h2>
+        {isLoadingDoctors ? (
+          <p className="text-gray-500 text-sm">Loading available staff...</p>
+        ) : availableDoctors.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {availableDoctors.map((doc) => (
+              <div key={doc.id} className="p-5 border border-gray-100 dark:border-gray-700 rounded-2xl bg-white dark:bg-gray-800 shadow-sm flex flex-col items-start">
+                <h3 className="font-bold text-gray-800 dark:text-white">{doc.name}</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">{doc.specialty || 'General Practitioner'}</p>
+                <span className="text-xs bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 font-bold px-3 py-1 rounded-full uppercase tracking-wider">Available</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="bg-gray-50 dark:bg-gray-900/50 p-6 rounded-2xl border border-dashed border-gray-200 dark:border-gray-700 text-center">
+            <p className="text-sm text-gray-500 dark:text-gray-400">No doctors are currently available. Please wait...</p>
+          </div>
+        )}
+      </div>
 
       {/* --- REAL MEDICAL HISTORY SECTION --- */}
       <div className="mt-12 mb-8 animate-fade-in-up">

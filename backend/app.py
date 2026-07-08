@@ -213,17 +213,25 @@ def complete_patient(patient_id):
         data = request.json or {}
         doctor_advice = data.get('advice', 'Standard treatment applied. Rest and hydrate.')
 
-        # Find the patient's active visit
+        # 1. Update the patient's visit to 'Treated'
         active = supabase.table('visits').select('id').eq('patient_id', patient_id).neq('status', 'Treated').order('created_at', desc=True).limit(1).execute()
         
         if active.data:
-            # Update to Treated (This automatically preserves it for their History page!)
             supabase.table('visits').update({
                 'status': 'Treated',
                 'doctor_advice': doctor_advice
             }).eq('id', active.data[0]['id']).execute()
             
-            return jsonify({"message": "Patient marked as treated."})
+            # --- NEW: INVENTORY DEDUCTION LOGIC ---
+            # If the doctor prescribes Paracetamol, deduct it automatically!
+            if "paracetamol" in doctor_advice.lower():
+                # Fetch current stock
+                item = supabase.table('inventory').select('quantity').eq('item_name', 'Paracetamol 500mg').execute()
+                if item.data and item.data[0]['quantity'] > 0:
+                    new_qty = item.data[0]['quantity'] - 10 # Deduct a strip of 10
+                    supabase.table('inventory').update({'quantity': new_qty}).eq('item_name', 'Paracetamol 500mg').execute()
+            
+            return jsonify({"message": "Patient marked as treated. Inventory updated if applicable."})
             
         return jsonify({"error": "Patient not found or already treated."}), 404
     except Exception as e:
@@ -382,21 +390,22 @@ def stream_triage():
         data = request.json
         user_message = data.get("message", "")
         chat_history = data.get("history", [])
+        
+        # Default to English if no language is provided
+        language = data.get("language", "English")
 
-        # System prompt to act like a professional medical assistant
+        # Explicitly declare output language in the system prompt for accurate alignment 
         messages = [
-            {"role": "system", "content": "You are a professional medical triage assistant. Be empathetic, concise, and ask one follow-up question at a time to understand symptoms. If the patient describes an emergency, advise them to seek help immediately."},
+            {"role": "system", "content": f"You are a professional medical triage assistant. You must communicate exclusively in {language}. Be empathetic, concise, and ask one follow-up question at a time to understand symptoms. If the patient describes an emergency, advise them to seek help immediately."}
         ] + chat_history + [{"role": "user", "content": user_message}]
 
         def generate():
-            # Call Groq with stream=True
             stream = groq_client.chat.completions.create(
-                model="llama3-8b-8192",
+                model="llama-3.1-8b-instant",
                 messages=messages,
                 temperature=0.7,
                 stream=True
             )
-            # Extract text from chunk.choices[0].delta.content
             for chunk in stream:
                 if chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
@@ -405,6 +414,83 @@ def stream_triage():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/facility_resources', methods=['GET'])
+def get_facility_resources():
+    try:
+        # Fetch Beds
+        beds_res = supabase.table('facility_status').select('*').eq('id', 1).execute()
+        
+        # Fetch Inventory
+        inv_res = supabase.table('inventory').select('*').order('quantity', desc=False).execute()
+        
+        # --- NEW: PREDICTIVE BURN RATE ALGORITHM ---
+        enriched_inventory = []
+        for item in inv_res.data:
+            # We simulate a "Daily Usage Rate" based on the item type.
+            # In a production environment, this would be an ML model predicting future usage based on historical trends.
+            if "Paracetamol" in item['item_name']:
+                daily_burn = 25  # High usage
+            elif "IV Fluids" in item['item_name']:
+                daily_burn = 10  # Medium usage
+            else:
+                daily_burn = 2   # Low usage
+
+            # Calculate days until total stock-out
+            days_left = item['quantity'] / daily_burn if daily_burn > 0 else 999
+            
+            # Inject the prediction back into the data object
+            item['daily_burn'] = daily_burn
+            item['days_remaining'] = round(days_left)
+            enriched_inventory.append(item)
+            
+        return jsonify({
+            "beds": beds_res.data[0] if beds_res.data else {},
+            "inventory": enriched_inventory
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/health-trends', methods=['GET'])
+def get_health_trends():
+    try:
+        response = supabase.table('visits').select('predicted_disease').not_.is_('predicted_disease', 'null').execute()
+        
+        trends = {}
+        for visit in response.data:
+            disease = visit.get('predicted_disease', 'Unknown')
+            trends[disease] = trends.get(disease, 0) + 1
+            
+        return jsonify({"trends": trends}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update_doctor_status', methods=['POST'])
+def update_doctor_status():
+    data = request.json
+    doctor_id = data.get('doctor_id')
+    is_busy = data.get('is_busy')
+    
+    # Update Supabase
+    supabase.table('doctors').update({'is_busy': is_busy}).eq('id', doctor_id).execute()
+    
+    return jsonify({"success": True}), 200
+
+@app.route('/available-doctors', methods=['GET'])
+def get_available_doctors():
+    try:
+        # Fetch doctors who are online and NOT busy
+        response = supabase.table('doctors').select('*').eq('is_online', True).eq('is_busy', False).execute()
+        return jsonify(response.data), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/all-doctors', methods=['GET'])
+def get_all_doctors():
+    try:
+        response = supabase.table('doctors').select('*').execute()
+        return jsonify(response.data), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     # Starts the server!

@@ -1,37 +1,71 @@
-import React, { useContext, useState } from 'react';
+import React, { useContext, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueue } from '../hooks/useQueue';
 import { AuthContext } from '../context/AuthContext';
 import PatientCard from '../components/PatientCard';
 import QueueStats from '../components/QueueStats';
+import { toast } from 'react-toastify';
+import apiClient from '../api';
 
 const DoctorDashboard = () => {
   const { queue, isLoading, markPatientAsTreated } = useQueue();
   const { logout } = useContext(AuthContext); 
   const navigate = useNavigate();
 
-  // --- 🆕 NEW STATE FOR MEDICAL HISTORY ---
   const [historyData, setHistoryData] = useState([]);
   const [expandedPatientId, setExpandedPatientId] = useState(null);
+  
+  // --- NEW: State to hold all doctors ---
+  const [doctors, setDoctors] = useState([]);
 
   const totalPatients = queue.length;
   const criticalPatients = queue.filter((p) => p.priority >= 100).length;
   const stablePatients = totalPatients - criticalPatients;
 
-  // Handles securely logging the doctor out and returning to the portal
+  // --- NEW: Fetch all doctors on load ---
+  useEffect(() => {
+    const fetchDoctors = async () => {
+      try {
+        const response = await apiClient.get('/all-doctors');
+        setDoctors(response.data);
+      } catch (error) {
+        console.error("Error fetching doctors:", error);
+      }
+    };
+    fetchDoctors();
+  }, []);
+
   const handleLogout = () => {
     logout();
     navigate('/patient');
   };
 
-  // --- 🆕 NEW FIX: HANDLE CALL IN ---
+  // --- NEW: Toggle specific doctor ---
+  const toggleSpecificDoctor = async (doctorId, currentBusyStatus, doctorName) => {
+    try {
+      const newStatus = !currentBusyStatus;
+      await apiClient.post('/update_doctor_status', { 
+        doctor_id: doctorId, 
+        is_busy: newStatus 
+      });
+      
+      // Update local state instantly so the button color changes
+      setDoctors(doctors.map(doc => 
+        doc.id === doctorId ? { ...doc, is_busy: newStatus } : doc
+      ));
+      
+      toast.info(`${doctorName} is now ${newStatus ? 'Busy' : 'Available'}`);
+    } catch (error) {
+      toast.error("Failed to update status.");
+    }
+  };
+
   const handleCallIn = async (patientId) => {
     try {
         const response = await fetch(`http://127.0.0.1:5000/call_patient/${patientId}`, {
             method: 'POST'
         });
         if (response.ok) {
-            // Force a quick reload so the Doctor sees the UI update instantly
             window.location.reload(); 
         }
     } catch (error) {
@@ -39,9 +73,7 @@ const DoctorDashboard = () => {
     }
   };
 
-  // --- 🆕 NEW FIX: HANDLE VIEW HISTORY ---
   const handleViewHistory = async (patientId) => {
-    // If it's already open, click it again to close it
     if (expandedPatientId === patientId) {
         setExpandedPatientId(null);
         return;
@@ -50,7 +82,7 @@ const DoctorDashboard = () => {
         const response = await fetch(`http://127.0.0.1:5000/patient_history/${patientId}`);
         const data = await response.json();
         setHistoryData(data);
-        setExpandedPatientId(patientId); // Opens the dropdown for this specific patient
+        setExpandedPatientId(patientId);
     } catch (error) {
         console.error("Error fetching history:", error);
     }
@@ -59,10 +91,8 @@ const DoctorDashboard = () => {
   return (
     <div className="container mx-auto p-6 md:p-10 max-w-7xl">
       
-      {/* Header section wrapper */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-8 gap-4">
         
-        {/* Left Side: Back Button & Title */}
         <div className="flex items-center gap-4">
           <button 
             onClick={() => navigate(-1)} 
@@ -79,14 +109,29 @@ const DoctorDashboard = () => {
           </h1>
         </div>
 
-        {/* Right Side: Doctor Logout Button */}
-        <button 
-          onClick={handleLogout} 
-          className="px-4 py-2 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 font-bold rounded-lg border border-red-100 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors text-sm uppercase tracking-wider"
-        >
-          Log Out
-        </button>
+        {/* --- NEW: Dynamic Doctor Toggle Buttons --- */}
+        <div className="flex flex-wrap items-center gap-3">
+            {doctors.map((doc) => (
+              <button 
+                key={doc.id}
+                onClick={() => toggleSpecificDoctor(doc.id, doc.is_busy, doc.name)}
+                className={`px-4 py-2 rounded-xl font-bold text-[10px] md:text-xs uppercase tracking-widest transition-all border ${
+                  doc.is_busy 
+                    ? 'bg-red-50 text-red-700 hover:bg-red-100 border-red-200' 
+                    : 'bg-green-50 text-green-700 hover:bg-green-100 border-green-200'
+                }`}
+              >
+                {doc.name}: {doc.is_busy ? "Busy" : "Available"}
+              </button>
+            ))}
 
+            <button 
+              onClick={handleLogout} 
+              className="px-4 py-2 bg-gray-800 text-white font-bold rounded-lg hover:bg-gray-700 transition-colors text-xs uppercase tracking-wider ml-2 shadow-md"
+            >
+              Log Out
+            </button>
+        </div>
       </div>
 
       <QueueStats total={totalPatients} critical={criticalPatients} stable={stablePatients} />
@@ -108,8 +153,6 @@ const DoctorDashboard = () => {
               patient={patient} 
               index={index} 
               onComplete={markPatientAsTreated} 
-              
-              /* 🆕 NEW PROPS PASSED TO THE CARD */
               onCallIn={() => handleCallIn(patient.id)}
               onViewHistory={() => handleViewHistory(patient.id)}
               isHistoryExpanded={expandedPatientId === patient.id}

@@ -6,7 +6,7 @@ import axios from 'axios';
  * Hardcoded to connect directly to the live Python backend on Render.
  * -------------------------------------------------------------------------
  */
-const API_BASE_URL = 'https://mediflow-ai-backend.onrender.com';
+const API_BASE_URL = 'http://127.0.0.1:5000';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -95,6 +95,28 @@ export const retrieveExistingPatient = async (phone) => {
     return response.data; 
   } catch (error) {
     throw error.response?.data || { error: "Server connection failed" };
+  }
+};
+
+// 9. NEW: Stream AI Triage Chat (Multilingual Groq LLM)
+export const streamTriageChat = async (message, chatHistory, language) => {
+  try {
+    // Native fetch is used here to handle the readable stream from Groq
+    const response = await fetch(`${API_BASE_URL}/stream-triage`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: message,
+        history: chatHistory,
+        language: language // Dynamically passes the selected language!
+      }),
+    });
+    return response;
+  } catch (error) {
+    console.error("Streaming API Error:", error);
+    throw error;
   }
 };
 
