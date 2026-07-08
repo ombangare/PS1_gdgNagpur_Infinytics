@@ -6,7 +6,7 @@ import axios from 'axios';
  * Hardcoded to connect directly to the live Python backend on Render.
  * -------------------------------------------------------------------------
  */
-const API_BASE_URL = 'http://127.0.0.1:5000';
+const API_BASE_URL = 'https://render.com/docs/web-services#port-binding';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
