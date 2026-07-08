@@ -6,7 +6,7 @@ import axios from 'axios';
  * Hardcoded to connect directly to the live Python backend on Render.
  * -------------------------------------------------------------------------
  */
-const API_BASE_URL = 'https://render.com/docs/web-services#port-binding';
+const API_BASE_URL = 'https://mediflow-ai-b9ee.onrender.com';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
