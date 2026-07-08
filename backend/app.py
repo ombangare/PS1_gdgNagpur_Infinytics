@@ -38,7 +38,7 @@ supabase: Client = create_client(supabase_url, supabase_key)
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": ["https://mediflow-ai-omega.vercel.app"]}})
 
 DOCTORS = ["Dr. Sharma", "Dr. Mehta", "Dr. Iyer"]
 
